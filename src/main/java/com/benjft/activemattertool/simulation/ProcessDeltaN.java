@@ -46,7 +46,7 @@ public class ProcessDeltaN implements StateProcessor<Double> {
 
         double newM = 0, oldM = 0, newS = 0, oldS = 0, newVar = 0, oldVar = 0;
         int count = 0;
-        final int minCount = 1000;
+        final int minCount = 500;
 
         final double len = Math.sqrt(Math.PI * 0.25 * Nl / sim.getPackingFraction());
 
@@ -68,17 +68,18 @@ public class ProcessDeltaN implements StateProcessor<Double> {
                 oldS = newS;
                 oldVar = newVar;
                 newM = oldM + (n - oldM) / count;
-                newS = oldS + (n - oldM) * (n - Nl);
+                newS = oldS + (n - oldM) * (n - newM);
                 newVar = newS / (count - 1);
             }
         }
 
-        return new DoublePair(Nl, Math.sqrt(newVar));
+        return new DoublePair(newM, Math.sqrt(newVar));
     }
 
     private int getNNear(double cx, double cy, double len, double[][] state, int[][][] grid) {
         int count = 0;
 
+        len /= 2;
         // iterate columns that could contain particles close enough
         for (double x = -len; x <= len; x += sim.getCellWidth()) {
             // round to column number
@@ -97,7 +98,7 @@ public class ProcessDeltaN implements StateProcessor<Double> {
             // iterate rows that could contain particles close enough
             for (double y = -len; y <= len; y += sim.getCellHeight()) {
                 // round to column number
-                int row = (int) ((cy + len) / sim.getCellHeight());
+                int row = (int) ((cy + y) / sim.getCellHeight());
                 double shiftY = 0;
 
                 // bind to limit and set shift in x coord if wrapped.
@@ -117,8 +118,8 @@ public class ProcessDeltaN implements StateProcessor<Double> {
                     double dx = particle[0] + shiftX - cx;
                     double dy = particle[1] + shiftY - cy;
 
-                    double r = Math.sqrt(dx * dx + dy * dy);
-                    if (r < len) ++count;
+//                    double r = Math.sqrt(dx * dx + dy * dy);
+                    if (Math.abs(dx) < len && Math.abs(dy) < len) ++count;
                 }
             }
         }
