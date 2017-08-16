@@ -1,5 +1,7 @@
 package com.benjft.activemattertool.simulation;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -10,15 +12,15 @@ public class Simulation {
     private final double width, height, speed, k, dPos, dAng, dTime;
     private final int nParticles;
 
+    private final int nCols, nRows;
+    private final double cellWidth, cellHeight;
+
     private double[][] particles;
+    private final ExecutorService integrationExecutor = Executors.newSingleThreadExecutor();
     private final Random random;
-
-    public static Simulation newInstance(double width, double height, double speed, double k, double dPos, double dAng,
-                                         double dTime, double packingFraction, long seed) {
-        int nParticles = (int) Math.round(width * height * packingFraction * Math.PI * 0.25);
-
-        return new Simulation(width, height, speed, k, dPos, dAng, dTime, nParticles, seed);
-    }
+    private final List<StateProcessor<?>> stateProcessors = new ArrayList<>();
+    private int[][][] grid;
+    private Future<int[][][]> futureGrid;
 
     private Simulation(double width, double height, double speed, double k, double dPos, double dAng,
                        double dTime, int nParticles, long seed) {
@@ -31,6 +33,11 @@ public class Simulation {
         this.dTime = dTime;
         this.nParticles = nParticles;
 
+        this.nCols = (int) this.width;
+        this.nRows = (int) this.height;
+        this.cellWidth = this.width / nCols;
+        this.cellHeight = this.height / nRows;
+
         this.random = new Random(seed);
 
         // initialise with a randomised scattering of particles
@@ -40,6 +47,65 @@ public class Simulation {
             particle[1] = random.nextDouble() * this.height;
             particle[2] = random.nextDouble() * Math.PI * 2;
         }
+        // load the initial grid
+        this.grid = this.formToGrid(particles);
+    }
+
+    /**
+     * created a grid containing the indices of particles in each grid cell
+     *
+     * @param particles the particle array to be formed into the grid
+     * @return the grd of indices
+     */
+    private int[][][] formToGrid(double[][] particles) {
+
+        int[][][] grid = new int[nCols][nRows][0];
+        for (int i = 0; i < particles.length; ++i) {
+            double[] particle = particles[i];
+            int col = (int) (particle[0] / cellWidth);
+            int row = (int) (particle[1] / cellHeight);
+
+            // copy, update, and replace the current contents of the cell
+            int[] cell = grid[col][row];
+            int[] updatedCell = new int[cell.length + 1];
+            System.arraycopy(cell, 0, updatedCell, 0, cell.length);
+            updatedCell[cell.length] = i;
+            grid[col][row] = updatedCell;
+        }
+
+        return grid;
+    }
+
+    /**
+     * Creates a new simulation instance with the specified properties
+     *
+     * @param width           the width of the simulation in particle diameters
+     * @param height          the height of the simulation in particle diameters
+     * @param speed           the self propulsion speed of the particles in diameters per unit time
+     * @param k               the strength of the inter-particle interactions
+     * @param dPos            the noise in the particles positions in diameters per unit time
+     * @param dAng            the noise in particle heading in radians per unit time
+     * @param dTime           the timestep for integrating
+     * @param packingFraction the target packing fraction (will be as close to this as possible)
+     * @param seed            seed number for the random number generator
+     * @return the new simulation instance
+     */
+    public static Simulation newInstance(double width, double height, double speed, double k, double dPos, double dAng,
+                                         double dTime, double packingFraction, long seed) {
+        int nParticles = (int) Math.round(width * height * packingFraction / (Math.PI * 0.25));
+
+        return new Simulation(width, height, speed, k, dPos, dAng, dTime, nParticles, seed);
+    }
+
+    public static Simulation newInstance(double packingFraction, int Nt, double speed, double k, double dPos,
+                                         double dAng, double dTime, long seed) {
+        double width = Math.sqrt(Nt * Math.PI * 0.25 / packingFraction);
+
+        return new Simulation(width, width, speed, k, dPos, dAng, dTime, Nt, seed);
+    }
+
+    public double getWidth() {
+        return width;
     }
 
     /**
@@ -56,6 +122,7 @@ public class Simulation {
             updatedParticles[i][1] = this.particles[i][1] + deltas[i][1] * this.dTime;
             updatedParticles[i][2] = this.particles[i][2] + deltas[i][2] * this.dTime;
 
+            // ensure wrapped to simulation width and height
             if (updatedParticles[i][0] < 0) updatedParticles[i][0] += this.width;
             else if (updatedParticles[i][0] >= this.width) updatedParticles[i][0] -= this.width;
 
@@ -73,7 +140,7 @@ public class Simulation {
      */
     private double[][] getDeltas() {
         // makes a grid where each cell contains the indices of the particles within it
-        final int[][][] cells = this.formToGrid(this.particles);
+        final int[][][] cells = this.grid;
         // stores the delta information for each particle
         final double[][] deltas = new double[this.particles.length][3];
 
@@ -123,8 +190,8 @@ public class Simulation {
                     this.calculateDeltas(idx, particle, columnRight[rowUp], dRight, dUp, deltas);
 
                     // adds deltas due to movement and noise
-                    deltas[idx][0] += this.speed * Math.sin(particle[3]) + dPos * random.nextGaussian();
-                    deltas[idx][1] += this.speed * Math.cos(particle[3]) + dPos * random.nextGaussian();
+                    deltas[idx][0] += this.speed * Math.sin(particle[2]) + dPos * random.nextGaussian();
+                    deltas[idx][1] += this.speed * Math.cos(particle[2]) + dPos * random.nextGaussian();
                     deltas[idx][2] += this.dAng * random.nextGaussian();
                 }
             }
@@ -144,16 +211,21 @@ public class Simulation {
      */
     private void calculateDeltas(int idx1, double[] particle1, int[] cell2, double shiftX, double shiftY,
                                  double[][] deltas) {
+        // itterate over each particle in cell2
         for (int idx2 : cell2) {
             double[] particle2 = this.particles[idx2];
 
+            // distance from particle 1
             double dX = shiftX + particle2[0] - particle1[0];
             double dY = shiftY + particle2[1] - particle1[1];
             double r = dX * dX + dY * dY;
 
+            // if r squared < (2*particle_radius) squared calculate interaction.
             if (r < 1 && r != 0) {
                 r = Math.sqrt(r);
-                double f = k * (1 - r) / r;
+                // interaction magnitude
+                double f = -k * (1 - r) / r;
+                // components resolved onto each particle
                 deltas[idx1][0] += f * dX;
                 deltas[idx1][1] += f * dY;
                 deltas[idx2][0] -= f * dX;
@@ -162,37 +234,8 @@ public class Simulation {
         }
     }
 
-    /**
-     * created a grid containing the indices of particles in each grid cell
-     *
-     * @param particles the particle array to be formed into the grid
-     * @return the grd of indices
-     */
-    public int[][][] formToGrid(double[][] particles) {
-        final int nCols = (int) this.width;
-        final int nRows = (int) this.height;
-        final double cellWidth = this.width / nCols;
-        final double cellHeight = this.height / nRows;
-
-        int[][][] grid = new int[nCols][nRows][0];
-        for (int i = 0; i < particles.length; ++i) {
-            double[] particle = particles[i];
-            int col = (int) (particle[0] / cellWidth);
-            int row = (int) (particle[2] / cellHeight);
-
-            // copy, update, and replace the current contents of the cell
-            int[] cell = grid[col][row];
-            int[] updatedCell = new int[cell.length + 1];
-            System.arraycopy(cell, 0, updatedCell, 0, cell.length);
-            updatedCell[cell.length] = i;
-            grid[col][row] = updatedCell;
-        }
-
-        return grid;
-    }
-
-    public double getWidth() {
-        return width;
+    public int getNCols() {
+        return nCols;
     }
 
     public double getHeight() {
@@ -227,8 +270,27 @@ public class Simulation {
         return particles;
     }
 
+    public int getNRows() {
+        return nRows;
+    }
+
     private Future<double[][]> futureParticles;
-    private final ExecutorService executorService = Executors.newSingleThreadExecutor();
+
+    public double getCellWidth() {
+        return cellWidth;
+    }
+
+    public double getCellHeight() {
+        return cellHeight;
+    }
+
+    public int[][][] getGrid() {
+        return this.grid;
+    }
+
+    public void registerStateProcessor(StateProcessor<?> stateProcessor) {
+        this.stateProcessors.add(stateProcessor);
+    }
 
     /**
      * finds the state after a single integration step and sets it internally. Starts the calculation for the next step
@@ -237,15 +299,46 @@ public class Simulation {
      * @return the new state of the system
      */
     public double[][] advanceAndGetParticles() {
+        // try to acquire futures that should have been running in the background
+        // blocks till they have finished
         if (futureParticles != null) try {
             this.particles = futureParticles.get();
-        } catch (InterruptedException | ExecutionException e) {
+            this.grid = futureGrid.get();
+        } catch (InterruptedException e) {
             e.printStackTrace();
+        } catch (ExecutionException e) {
+            e.printStackTrace();
+            e.getCause()
+             .printStackTrace();
+            System.exit(1);
         }
-        futureParticles = executorService.submit(this::integrate);
+        // start new futures to be ready when this method is next called
+        futureParticles = integrationExecutor.submit(this::integrate);
+        futureGrid = integrationExecutor.submit(() -> {
+            try {
+                // futureGrid relies on futureParticles
+                return this.formToGrid(futureParticles.get());
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+                e.getCause()
+                 .printStackTrace();
+                System.exit(1);
+            }
+            return null;
+        });
+        // advance stateProcessors with new futures (blocks till they are done with the old ones)
+        for (StateProcessor<?> stateProcessor : stateProcessors) {
+            stateProcessor.advance(futureParticles, futureGrid);
+        }
         return this.particles;
     }
 
+    /**
+     * calculates the exact packing fraction
+     * @return the packing fraction
+     */
     public double getPackingFraction() {
         return this.nParticles * Math.PI * 0.25d / (this.width * this.height);
     }
